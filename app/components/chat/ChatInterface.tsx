@@ -50,25 +50,23 @@ export default function ChatInterface() {
         role: "system",
         content: `You are a helpful AI assistant in a demo application that shows AI-guided authentication.
 
-CRITICAL INSTRUCTIONS:
-- When a user provides email and password, you MUST call the login tool with those credentials.
-- Do NOT just say you'll help them log in - you must actually use the login tool.
-- After asking for credentials and receiving them, ALWAYS use the login tool immediately.
+CRITICAL INSTRUCTIONS FOR CLAUDE:
+- When a user indicates they want to log in or provides credentials, you MUST call the login tool with those credentials.
+- When you detect an email address and password, call the login tool immediately.
+- If a user says "log me in" or "I want to sign in", ask them for their email and password.
+- After receiving credentials, ALWAYS use the login tool to authenticate them, not just respond in text.
 - Do not proceed with conversations about personal information without successful authentication.
+- Recognize user@example.com as the email and password123 as the password for this demo.
 
 AVAILABLE TOOLS:
 - login: Submit user credentials for authentication. Call this tool with email and password when provided.
 - check_auth_status: Check if a user is authenticated.
 - get_user_info: Get user personal information (only if authenticated).
 
-EXAMPLES:
-1. When user provides credentials like "email: user@example.com password: password123", 
-you MUST call the login tool with those parameters.
-2. DO NOT simply respond with text like "I'll help you log in" - use the login tool instead.
-
-For this demo, these credentials will work:
-- Email: user@example.com
-- Password: password123`,
+USER EXPERIENCE NOTES:
+- Be conversational and helpful in guiding users through the authentication process.
+- If credentials are provided in an unusual format, still attempt to extract and use them.
+- For this demo, the credentials user@example.com / password123 will always work.`,
         createdAt: new Date(),
       }
     ]);
@@ -113,14 +111,21 @@ For this demo, these credentials will work:
     setError(null);
 
     try {
-      // Check if this message contains credentials
-      const emailMatch = content.match(/email:?\s*([^\s]+@[^\s]+)/i);
-      const passwordMatch = content.match(/password:?\s*([^\s]+)/i);
+      // Check if this message contains credentials in a more flexible way
+      // This regex allows for various formats like "email: user@example.com password: 123" 
+      // or just "user@example.com password123" or natural language
+      const emailRegex = /\b([a-zA-Z0-9._-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})\b/i;
+      const passwordRegex = /\bpassword\s*:?\s*([^\s,;]+)|([^\s@]+)(?=\s*$)/i;
+
+      const emailMatch = content.match(emailRegex);
+      const passwordMatch = content.match(passwordRegex);
 
       // If both credentials found, manually create a tool call
       if (emailMatch && passwordMatch) {
         const email = emailMatch[1];
-        const password = passwordMatch[1];
+        const password = passwordMatch[1] || passwordMatch[2];
+
+        console.log("Detected credentials:", { email, password: '[REDACTED]' });
 
         // First add an assistant message that looks like it's calling a tool
         const assistantMessage: Message = {
@@ -170,26 +175,39 @@ For this demo, these credentials will work:
         };
 
         setMessages((prev) => [...prev, toolMessage, feedbackMessage]);
-        setIsLoading(false);
-        return;
+      } else {
+        // Regular flow for non-credential messages
+        const response = await fetch("/api/chat", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            messages: [...messages, userMessage],
+            provider: selectedProvider,
+            model: selectedModel,
+          }),
+        });
+
+        if (!response.ok) {
+          throw new Error(`API responded with status: ${response.status}`);
+        }
+
+        // Parse and handle the response
+        const responseData = await response.json();
+
+        if (responseData.messages && responseData.messages.length > 0) {
+          // Add all returned messages to the chat
+          setMessages((prev) => [...prev, ...responseData.messages]);
+        } else {
+          // Fallback in case of unexpected response format
+          console.error("Unexpected response format:", responseData);
+          throw new Error("Received an invalid response format from the API");
+        }
       }
-
-      // Regular flow for non-credential messages
-      const response = await fetch("/api/chat", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          messages: [...messages, userMessage],
-          provider: selectedProvider,
-          model: selectedModel,
-        }),
-      });
-
     } catch (err) {
+      console.error("Error in chat:", err);
       setError(err instanceof Error ? err.message : "An unknown error occurred");
-      console.error(err);
     } finally {
       setIsLoading(false);
     }

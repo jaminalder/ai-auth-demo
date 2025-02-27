@@ -19,6 +19,7 @@ interface RouterRequest {
 }
 
 // Helper to convert our app message format to provider-specific format
+
 function formatMessagesForAnthropic(messages: Message[]) {
   // Extract system message for Anthropic's top-level system parameter
   const systemMessage = messages.find(msg => msg.role === 'system');
@@ -99,7 +100,11 @@ function formatToolsForAnthropic(tools: any[]) {
   return tools.map((tool) => ({
     name: tool.name,
     description: tool.description,
-    input_schema: tool.parameters,
+    input_schema: {
+      type: "object",
+      properties: tool.parameters.properties || {},
+      required: tool.parameters.required || [],
+    },
   }));
 }
 
@@ -125,36 +130,61 @@ export async function processLLMRequest(request: RouterRequest): Promise<Respons
         const { messages: formattedMessages, system } = formatMessagesForAnthropic(messages);
         const formattedTools = formatToolsForAnthropic(tools);
 
-        const response = await anthropic.messages.create({
-          model,
-          max_tokens: 1024,
+        console.log("Sending to Claude API:", {
           system,
-          messages: formattedMessages,
-          tools: formattedTools,
+          messageCount: formattedMessages.length,
+          tools: formattedTools.map(t => t.name),
         });
 
-        // Process the response
-        const content = response.content[0]?.text || "";
-        const toolCalls = response.tool_calls?.map(call => ({
-          id: call.id,
-          type: "function",
-          function: {
-            name: call.name,
-            arguments: JSON.stringify(call.input),
-          }
-        })) || [];
+        try {
+          const response = await anthropic.messages.create({
+            model,
+            max_tokens: 1024,
+            system,
+            messages: formattedMessages,
+            tools: formattedTools,
+          });
 
-        return new Response(
-          JSON.stringify({
-            content,
-            role: "assistant",
-            tool_calls: toolCalls
-          }),
-          {
-            status: 200,
-            headers: { 'Content-Type': 'application/json' }
-          }
-        );
+          console.log("Claude API response:", {
+            contentType: response.content[0]?.type,
+            hasToolCalls: !!response.tool_calls?.length,
+          });
+
+          // Process the response
+          const content = response.content[0]?.type === 'text' ? response.content[0]?.text || "" : "";
+          const toolCalls = response.tool_calls?.map(call => ({
+            id: call.id,
+            type: "function",
+            function: {
+              name: call.name,
+              arguments: JSON.stringify(call.input),
+            }
+          })) || [];
+
+          return new Response(
+            JSON.stringify({
+              content,
+              role: "assistant",
+              tool_calls: toolCalls
+            }),
+            {
+              status: 200,
+              headers: { 'Content-Type': 'application/json' }
+            }
+          );
+        } catch (error) {
+          console.error("Error calling Claude API:", error);
+          return new Response(
+            JSON.stringify({
+              error: "Failed to process request with Claude API",
+              details: error instanceof Error ? error.message : "Unknown error"
+            }),
+            {
+              status: 500,
+              headers: { 'Content-Type': 'application/json' }
+            }
+          );
+        }
       }
 
       case "openai": {
