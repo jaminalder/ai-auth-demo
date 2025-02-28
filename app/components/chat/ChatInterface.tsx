@@ -7,9 +7,11 @@ import MessageItem from "./MessageItem";
 import ChatInput from "./ChatInput";
 import ProviderSelector from "./ProviderSelector";
 import { Message, LLMProvider } from "@/app/lib/types";
+import AuthStatus from "../auth/AuthStatus";
+import { signIn } from "next-auth/react";
 
 export default function ChatInterface() {
-  const { data: session } = useSession();
+  const { data: session, status, update: updateSession } = useSession();
   const [messages, setMessages] = useState<Message[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -111,100 +113,51 @@ USER EXPERIENCE NOTES:
     setError(null);
 
     try {
-      // Check if this message contains credentials in a more flexible way
-      // This regex allows for various formats like "email: user@example.com password: 123" 
-      // or just "user@example.com password123" or natural language
-      const emailRegex = /\b([a-zA-Z0-9._-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})\b/i;
-      const passwordRegex = /\bpassword\s*:?\s*([^\s,;]+)|([^\s@]+)(?=\s*$)/i;
 
-      const emailMatch = content.match(emailRegex);
-      const passwordMatch = content.match(passwordRegex);
+      const emailMatch = content.match(/\b([a-zA-Z0-9._-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})\b/i);
+      const passwordMatch = content.match(/\bpassword\s*:?\s*([^\s,;]+)|([^\s@]+)(?=\s*$)/i);
 
-      // If both credentials found, manually create a tool call
+      // If both credentials found, use direct login
       if (emailMatch && passwordMatch) {
         const email = emailMatch[1];
         const password = passwordMatch[1] || passwordMatch[2];
 
         console.log("Detected credentials:", { email, password: '[REDACTED]' });
 
-        // First add an assistant message that looks like it's calling a tool
-        const assistantMessage: Message = {
-          id: uuidv4(),
-          role: "assistant",
-          content: "I'll process your login credentials using the authentication tool.",
-          toolCalls: [
-            {
-              id: uuidv4(),
-              type: "function",
-              function: {
-                name: "login",
-                arguments: JSON.stringify({ email, password }),
-              },
-            },
-          ],
-          createdAt: new Date(),
-        };
-
-        setMessages((prev) => [...prev, assistantMessage]);
-
-        // Then directly make the tool call
-        const loginResponse = await fetch("/api/tools/login", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ email, password }),
-        });
-
-        const loginResult = await loginResponse.json();
-
-        // Add tool result message
-        const toolMessage: Message = {
-          id: assistantMessage.toolCalls![0].id,
-          role: "tool",
-          content: JSON.stringify(loginResult),
-          createdAt: new Date(),
-        };
-
-        // Add feedback message
-        const feedbackMessage: Message = {
-          id: uuidv4(),
-          role: "assistant",
-          content: loginResult.success
-            ? `Login successful! You're now authenticated as ${loginResult.user?.name || 'Demo User'}. You can now access your personal information.`
-            : `Login failed: ${loginResult.message || 'Invalid credentials'}. ${loginResult.hint || 'Please try again.'}`,
-          createdAt: new Date(),
-        };
-
-        setMessages((prev) => [...prev, toolMessage, feedbackMessage]);
-      } else {
-        // Regular flow for non-credential messages
-        const response = await fetch("/api/chat", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            messages: [...messages, userMessage],
-            provider: selectedProvider,
-            model: selectedModel,
-          }),
-        });
-
-        if (!response.ok) {
-          throw new Error(`API responded with status: ${response.status}`);
-        }
-
-        // Parse and handle the response
-        const responseData = await response.json();
-
-        if (responseData.messages && responseData.messages.length > 0) {
-          // Add all returned messages to the chat
-          setMessages((prev) => [...prev, ...responseData.messages]);
-        } else {
-          // Fallback in case of unexpected response format
-          console.error("Unexpected response format:", responseData);
-          throw new Error("Received an invalid response format from the API");
-        }
+        // Use our direct login function - no need for API call
+        await manualLoginWithCredentials(email, password);
+        return; // Early return to avoid the regular flow
       }
+
+      // Regular flow for non-credential messages
+      const response = await fetch("/api/chat", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          messages: [...messages, userMessage],
+          provider: selectedProvider,
+          model: selectedModel,
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error(`API responded with status: ${response.status}`);
+      }
+
+      // Parse and handle the response
+      const responseData = await response.json();
+
+      if (responseData.messages && responseData.messages.length > 0) {
+        // Add all returned messages to the chat
+        setMessages((prev) => [...prev, ...responseData.messages]);
+      } else {
+        // Fallback in case of unexpected response format
+        console.error("Unexpected response format:", responseData);
+        throw new Error("Received an invalid response format from the API");
+      }
+
     } catch (err) {
       console.error("Error in chat:", err);
       setError(err instanceof Error ? err.message : "An unknown error occurred");
@@ -222,6 +175,80 @@ USER EXPERIENCE NOTES:
     // Keep only the system message
     const systemMessage = messages.find(m => m.role === "system");
     setMessages(systemMessage ? [systemMessage] : []);
+  };
+
+  const manualLoginWithCredentials = async (email: string, password: string) => {
+    setIsLoading(true);
+
+    try {
+      // Generate messages for UI feedback first
+      const assistantMessage: Message = {
+        id: uuidv4(),
+        role: "assistant",
+        content: "I'll process your login credentials using the authentication tool.",
+        toolCalls: [
+          {
+            id: uuidv4(),
+            type: "function",
+            function: {
+              name: "login",
+              arguments: JSON.stringify({ email, password }),
+            },
+          },
+        ],
+        createdAt: new Date(),
+      };
+
+      setMessages((prev) => [...prev, assistantMessage]);
+
+      // Directly call NextAuth signIn (more reliable than going through the API)
+      const result = await signIn("credentials", {
+        redirect: false,
+        email,
+        password,
+      });
+
+      // Create tool result message
+      const toolMessage: Message = {
+        id: assistantMessage.toolCalls![0].id,
+        role: "tool",
+        content: JSON.stringify({
+          success: !result?.error,
+          message: result?.error ? result.error : "Login successful"
+        }),
+        createdAt: new Date(),
+      };
+
+      // Create feedback message
+      const feedbackMessage: Message = {
+        id: uuidv4(),
+        role: "assistant",
+        content: result?.error
+          ? `Login failed: ${result.error}. Please try again with user@example.com / password123.`
+          : `Login successful! You're now authenticated as Demo User. You can now access your personal information.`,
+        createdAt: new Date(),
+      };
+
+      // Add messages to the chat
+      setMessages((prev) => [...prev, toolMessage, feedbackMessage]);
+
+      return !result?.error;
+    } catch (error) {
+      console.error("Error in manual login:", error);
+
+      // Add error message
+      const errorMessage: Message = {
+        id: uuidv4(),
+        role: "assistant",
+        content: "Sorry, I encountered an error processing your login. Please try again.",
+        createdAt: new Date(),
+      };
+
+      setMessages((prev) => [...prev, errorMessage]);
+      return false;
+    } finally {
+      setIsLoading(false);
+    }
   };
 
   return (
@@ -244,16 +271,7 @@ USER EXPERIENCE NOTES:
       />
 
       <div className="bg-gray-50 rounded-lg p-4 mb-4 border border-gray-200">
-        <div className="flex items-center mb-2">
-          <div className={`w-2 h-2 rounded-full mr-2 ${session ? 'bg-green-500' : 'bg-red-500'}`}></div>
-          <div className="text-sm font-medium text-gray-700">
-            {session ? (
-              <span className="text-green-600">Authenticated as {session.user?.name}</span>
-            ) : (
-              <span className="text-red-600">Not authenticated</span>
-            )}
-          </div>
-        </div>
+        <AuthStatus />
         <p className="text-sm text-gray-600">
           {session
             ? "The assistant can access your personal information. Try asking about your account details."

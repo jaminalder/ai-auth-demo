@@ -1,4 +1,4 @@
-import { auth } from "@/auth";
+import { auth, signIn } from "@/auth";
 
 // Tool schemas
 const AUTH_STATUS_SCHEMA = {
@@ -69,6 +69,7 @@ export const tools = [
       }
     },
   },
+  // Update this in app/lib/tools/registry.ts
   {
     name: "login",
     description: "Submit user credentials for authentication. Use this after getting email and password from the user.",
@@ -107,20 +108,46 @@ export const tools = [
         };
       }
 
-      // For demo, check against mock user
+      // For demo, check against mock user credentials
       const isValid = email === "user@example.com" && password === "password123";
       console.log("Credentials valid:", isValid);
 
       if (isValid) {
-        console.log("Login successful for demo user");
-        return {
-          success: true,
-          message: "Login successful! The user is now authenticated.",
-          user: {
-            name: "Demo User",
-            email: "user@example.com",
-          },
-        };
+        try {
+          // Actually create the session using NextAuth signIn
+          // This is the key part that was missing - we need to call the actual signIn function
+          const result = await signIn("credentials", {
+            redirect: false,
+            email,
+            password,
+          });
+
+          if (result?.error) {
+            console.log("NextAuth signIn failed:", result.error);
+            return {
+              success: false,
+              message: "Authentication system error",
+              error: result.error
+            };
+          }
+
+          console.log("Login successful for demo user, session created");
+          return {
+            success: true,
+            message: "Login successful! The user is now authenticated.",
+            user: {
+              name: "Demo User",
+              email: "user@example.com",
+            },
+          };
+        } catch (error) {
+          console.error("Error during NextAuth signIn:", error);
+          return {
+            success: false,
+            message: "Error during authentication process",
+            error: error instanceof Error ? error.message : "Unknown error"
+          };
+        }
       } else {
         console.log("Login failed: invalid credentials");
         return {
